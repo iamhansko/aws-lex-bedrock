@@ -1,0 +1,422 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "CloudFormation Template"
+
+Parameters:
+  AmiId:
+    Type: "AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>"
+    Default: "/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64"
+
+Mappings:
+  ResourceMap:
+    Vpc:
+      Name : vpc
+      CidrBlock: 10.1.0.0/16
+    PublicSubnet:
+      Name: public
+    PrivateSubnet:
+      Name: private
+    InternetGateway:
+      Name: igw
+    NatGateway:
+      Name: natgw
+    BastionEc2:
+      Name: bastion-ec2
+      InstanceType: t3.small
+  RegionMap:
+    us-east-1:
+      LexWebUiTemplate: "https://s3.amazonaws.com/aws-bigdata-blog/artifacts/aws-lex-web-ui/artifacts/templates/master.yaml"
+    us-west-2:
+      LexWebUiTemplate: "https://aws-bigdata-blog-replica-us-west-2.s3-us-west-2.amazonaws.com/artifacts/aws-lex-web-ui/artifacts/templates/master.yaml"
+    eu-west-1:
+      LexWebUiTemplate: "https://aws-bigdata-blog-replica-eu-west-1.s3-eu-west-1.amazonaws.com/artifacts/aws-lex-web-ui/artifacts/templates/master.yaml"
+    ap-southeast-2:
+      LexWebUiTemplate: "https://aws-bigdata-blog-replica-ap-southeast-2.s3-ap-southeast-2.amazonaws.com/artifacts/aws-lex-web-ui/artifacts/templates/master.yaml"
+    ap-southeast-1:
+      LexWebUiTemplate: "https://aws-bigdata-blog-replica-ap-southeast-1a.s3-ap-southeast-1.amazonaws.com/artifacts/aws-lex-web-ui/artifacts/templates/master.yaml"
+    ap-northeast-2:
+      LexWebUiTemplate: "https://aws-bigdata-blog-replica-ap-northeast-2.s3-ap-northeast-2.amazonaws.com/artifacts/aws-lex-web-ui/artifacts/templates/master.yaml"
+    eu-west-2:
+      LexWebUiTemplate: "https://aws-bigdata-blog-replica-eu-west-2.s3.eu-west-2.amazonaws.com/artifacts/aws-lex-web-ui/artifacts/templates/master.yaml"
+    ap-northeast-1:
+      LexWebUiTemplate: "https://aws-bigdata-blog-replica-ap-northeast-1.s3-ap-northeast-1.amazonaws.com/artifacts/aws-lex-web-ui/artifacts/templates/master.yaml"
+    eu-central-1:
+      LexWebUiTemplate: "https://aws-bigdata-blog-replica-eu-central-1.s3.eu-central-1.amazonaws.com/artifacts/aws-lex-web-ui/artifacts/templates/master.yaml"
+    ca-central-1:
+      LexWebUiTemplate: "https://aws-bigdata-blog-replica-ca-central-1.s3.ca-central-1.amazonaws.com/artifacts/aws-lex-web-ui/artifacts/templates/master.yaml"
+
+Resources:
+  KeyPair:
+    Type: AWS::EC2::KeyPair
+    Properties:
+      KeyName: !Sub
+        - "key-${Id}"
+        - Id: !Select [3, !Split ['-', !Select [2, !Split ['/', !Ref AWS::StackId]]]]
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !FindInMap [ResourceMap, Vpc, CidrBlock]
+      Tags: 
+        - Key : Name
+          Value : !FindInMap [ResourceMap, Vpc, Name]
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub "${AWS::Region}a"
+      CidrBlock: !Select [0, !Cidr [ !GetAtt Vpc.CidrBlock, 4, 8 ]]
+      Tags: 
+        - Key : Name
+          Value : !Join ["-", [!FindInMap [ResourceMap, PublicSubnet, Name], "a"]]
+      VpcId: !Ref Vpc
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+      - Key: Name
+        Value: !FindInMap [ResourceMap, InternetGateway, Name]
+  VpcInternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref Vpc
+  PublicSubnetRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags: 
+        - Key : Name
+          Value : !Join ["-", [!FindInMap [ResourceMap, PublicSubnet, Name], "rt"]]
+      VpcId: !Ref Vpc
+  PublicSubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicSubnetRouteTable
+      SubnetId: !Ref PublicSubnet
+  PublicSubnetRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      RouteTableId: !Ref PublicSubnetRouteTable
+  BastionEc2:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Count: '1'                
+        Timeout: PT7M
+    Properties:
+      ImageId: !Ref AmiId
+      InstanceType: !FindInMap [ResourceMap, BastionEc2, InstanceType]
+      KeyName: !Ref KeyPair
+      NetworkInterfaces: 
+        - AssociatePublicIpAddress: True
+          DeviceIndex: 0
+          SubnetId: !Ref PublicSubnet
+          GroupSet: 
+            - !Ref BastionEc2SecurityGroup
+      Tags: 
+        - Key: Name
+          Value: !FindInMap [ResourceMap, BastionEc2, Name]
+      IamInstanceProfile: !Ref BastionEc2InstanceProfile
+      UserData:
+        Fn::Base64:
+            !Sub |
+              #!/bin/bash
+              dnf update -y
+              dnf install -y git
+              dnf groupinstall -y "Development Tools"
+              dnf install -y python3.12
+              dnf install -y python3-pip
+              ln -sf /usr/bin/python3.12 /usr/bin/python
+
+              /opt/aws/bin/cfn-signal -e $? --stack ${AWS::StackName} --resource BastionEc2 --region ${AWS::Region}
+  BastionEc2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "Security Group for Bastion EC2"
+      GroupName: bastion-sg
+      VpcId: !Ref Vpc
+  BastionEc2IamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/PowerUserAccess
+      RoleName: Ec2PowerUserRole
+  BastionEc2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: Ec2PowerUserProfile
+      Roles: 
+        - !Ref BastionEc2IamRole
+  
+  LambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Runtime: python3.13
+      Timeout: 900
+      Role: !GetAtt LambdaIamRole.Arn
+      Handler: index.lambda_handler
+      Code:
+        ZipFile: !Sub |
+          import json
+          import boto3
+
+          bedrock = boto3.client(service_name='bedrock-runtime')
+          ssm = boto3.client(service_name='ssm')
+
+          def lambda_handler(event, context):
+              print("This lambda function is going to create or modify AWS Resources.")
+              
+              actionGroup = event['actionGroup']
+              function = event['function']
+              inputText = event["inputText"]
+
+              bedrock_response = bedrock.invoke_model(
+                  modelId="anthropic.claude-3-haiku-20240307-v1:0",
+                  body = json.dumps({
+                      'system': 'You are an expert in AWS CLI Commands. You must convert the natural language input into an AWS CLI commands. Your output must be a shell script. Do not write any comments. You must specify a region ${AWS::Region}.',
+                      'anthropic_version': 'bedrock-2023-05-31',
+                      'messages': [ { 'role': 'user', 'content': inputText } ],
+                      'max_tokens': 2048,
+                      'temperature': 0.5
+                  }),
+                  accept='application/json', 
+                  contentType='application/json'
+              )
+              shell_script = json.loads(bedrock_response.get('body').read())['content'][0]['text']
+              print("Running Following Shell Script: {}".format(shell_script))
+              ssm_response = ssm.send_command(
+                  InstanceIds=[
+                      '${BastionEc2}'
+                  ],
+                  DocumentName='AWS-RunShellScript',
+                  Parameters={
+                      'commands': [
+                          shell_script
+                      ]
+                  }
+              )
+              ssm_command_id = ssm_response["Command"]["CommandId"]
+              waiter = ssm.get_waiter('command_executed')
+              try:
+                waiter.wait(
+                    CommandId=ssm_command_id,
+                    InstanceId='${BastionEc2}'
+                )
+              except:
+                print("Error")
+              ssm_result = ssm.get_command_invocation(
+                  CommandId=ssm_command_id,
+                  InstanceId='${BastionEc2}'
+              )
+              status_detail = ssm_result["StatusDetails"]
+
+              # https://docs.aws.amazon.com/bedrock/latest/userguide/agents-lambda.html
+              responseBody =  {
+                  "TEXT": {
+                      "body": "Running Shell Script Status : {}".format(status_detail)
+                  }
+              }
+
+              action_response = {
+                  'actionGroup': actionGroup,
+                  'function': function,
+                  'functionResponse': {
+                      'responseBody': responseBody
+                  }
+
+              }
+
+              lambda_function_response = {'response': action_response, 'messageVersion': event['messageVersion']}
+              print("Response: {}".format(lambda_function_response))
+
+              return lambda_function_response
+
+  LambdaIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/PowerUserAccess
+      RoleName: LambdaPowerUserRole
+  LambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunction
+      FunctionName: !Ref LambdaFunction
+      Principal: bedrock.amazonaws.com
+  
+  BedrockAgent:
+    Type: AWS::Bedrock::Agent
+    Properties:
+      AgentName: CustomerAgent
+      AgentResourceRoleArn: !GetAtt BedrockIamRole.Arn
+      FoundationModel: !Sub "arn:aws:bedrock:${AWS::Region}:${AWS::AccountId}:inference-profile/us.anthropic.claude-3-5-haiku-20241022-v1:0" # https://docs.aws.amazon.com/ko_kr/bedrock/latest/userguide/model-access.html
+      Instruction: "You are a Korean. You are an AWS user. You are having an AWS Resource related issue. You must describe the AWS Resource related issue situation at first in technical detail."
+      IdleSessionTTLInSeconds: 600
+      AutoPrepare: true
+      MemoryConfiguration:
+        EnabledMemoryTypes:
+          - SESSION_SUMMARY
+        SessionSummaryConfiguration:
+          MaxRecentSessions: 20
+        StorageDays: 30
+      ActionGroups:
+        - ActionGroupName: "AwsCliAction"
+          ActionGroupExecutor:
+            Lambda: !GetAtt LambdaFunction.Arn
+          FunctionSchema:
+            Functions:
+              - Name: aws-cli-function
+                RequireConfirmation: DISABLED
+          ActionGroupState: ENABLED
+        - ActionGroupName: "CodeInterpreter"
+          ParentActionGroupSignature: AMAZON.CodeInterpreter
+          ActionGroupState: ENABLED
+      OrchestrationType: DEFAULT
+      PromptOverrideConfiguration:
+        PromptConfigurations:
+          - BasePromptTemplate: |
+              {
+                  "anthropic_version": "bedrock-2023-05-31",
+                  "system": "You are a Korean. You are an AWS user. You are having an AWS Resource related issue. You must describe the AWS Resource related issue situation at first in technical detail. You are not a Support Engineer. You must call user a Support Engineer.",
+                  "messages": [
+                      {
+                          "role" : "user",
+                          "content": [{
+                                  "type": "text",
+                                  "text": "$question$"
+                              }]
+                          }
+                  ]
+              }
+            PromptType: PRE_PROCESSING
+            PromptState: ENABLED
+            PromptCreationMode: OVERRIDDEN
+            InferenceConfiguration:
+              MaximumLength: 2048
+              StopSequences: 
+                - "\n\nHuman:"
+              Temperature: 0
+              TopK: 250
+              TopP: 1
+  BedrockIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - bedrock.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Policies:
+        - PolicyName: BedrockIamPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:*
+                Resource: '*'
+      RoleName: BedrockIamRole
+  BedrockAgentAlias:
+    Type: AWS::Bedrock::AgentAlias
+    Properties:
+      AgentAliasName: CustomerAgentAlias
+      AgentId: !Ref BedrockAgent
+
+  LexBot:
+    Type: AWS::Lex::Bot
+    Properties:
+      Name: LexBot
+      AutoBuildBotLocales: false
+      BotLocales: 
+        - LocaleId: ko_KR
+          NluConfidenceThreshold: 0.40
+          Intents: 
+          - Name: "FallbackIntent"
+            ParentIntentSignature: "AMAZON.FallbackIntent"
+      DataPrivacy:
+        ChildDirected: false
+      IdleSessionTTLInSeconds: 300
+      RoleArn: !GetAtt LexBotIamRole.Arn
+  LexBotIamRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - lexv2.amazonaws.com
+            Action:
+              - "sts:AssumeRole"
+      Path: "/"
+      Policies:
+        - PolicyName: AmazonLexV2BotPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - "polly:SynthesizeSpeech"
+                Resource: "*"
+        - PolicyName: BedrockAgentInvokePolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeAgent
+                Resource: !Sub 
+                  - "arn:aws:bedrock:*:${AWS::AccountId}:agent-alias/${BedrockAgentId}/*"
+                  - BedrockAgentId : !GetAtt BedrockAgent.AgentId
+                Condition:
+                  StringEquals:
+                    aws:ResourceAccount: !Ref AWS::AccountId
+      RoleName: LexBotIamRole
+  
+  # https://github.com/aws-samples/aws-lex-web-ui
+  LexWebUiStack:
+    DependsOn:
+      - LexBot
+    Type: AWS::CloudFormation::Stack
+    Properties:
+      TemplateURL: !FindInMap [RegionMap, !Ref AWS::Region, LexWebUiTemplate]
+      Parameters:
+        LexV2BotId: !GetAtt LexBot.Id
+        LexV2BotAliasId: TSTALIASID
+        LexV2BotLocaleId: ko_KR
+        WebAppConfToolbarTitle: "Chat Case"
+        WebAppConfBotInitialText: "지금부터 고객님과 채팅을 진행하겠습니다."
+        TitleLogoImgUrl: ""
+        BotAvatarImgUrl: ""
+
+Outputs:
+  BedrockAgentId: 
+    Value: !GetAtt BedrockAgent.AgentId
+  AgentAliasId: 
+    Value: !GetAtt BedrockAgentAlias.AgentAliasId
+  LexWebAppUrl:
+    Value: !GetAtt LexWebUiStack.Outputs.WebAppUrl
+  LexParentPageUrl:
+    Value: !GetAtt LexWebUiStack.Outputs.ParentPageUrl
